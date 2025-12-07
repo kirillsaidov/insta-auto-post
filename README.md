@@ -103,6 +103,33 @@ The script uses captions in this order:
 
 ## Customization
 
+### Caption Variables
+
+You can use template variables in your captions that will be automatically replaced with image metadata.
+
+**Example caption file (images/photo.jpg.caption.txt):**
+```
+{FILE_NAME}.
+
+{IMAGE_MAKE} {IMAGE_MODEL} | {IMAGE_F_NUMBER} | {IMAGE_EXPOSURE_TIME} | {IMAGE_FOCAL_LENGTH} | ISO {IMAGE_PHOTOGRAPHIC_SENSITIVITY}
+
+#landscape #nature #{IMAGE_MAKE_TAG} #{IMAGE_MODEL_TAG}
+```
+
+**Result:**
+```
+photo.
+
+Panasonic DMC-TZ8 | f6.3 | 1/200 sec | 42.6 mm | ISO 125
+
+#landscape #nature #panasonic #dmctz8
+```
+
+**List all available variables:**
+```bash
+python insta_auto_post.py --list-vars
+```
+
 ### Change default caption
 
 Edit `instagram_uploader.py`:
