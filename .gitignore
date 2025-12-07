@@ -1,0 +1,38 @@
+# Environment variables (contains credentials)
+.env
+
+# Instabot session and config files
+config/
+
+# Log files
+*.log
+instagram_uploader.log
+
+# Uploaded files directory
+uploaded/
+
+# Python cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environment
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Keep example files
+!.env.example
