@@ -12,7 +12,8 @@ import logging
 from pathlib import Path
 from typing import Optional, Dict, Any
 from dotenv import load_dotenv
-from instabot import Bot
+from instagrapi import Client
+from instagrapi.exceptions import LoginRequired
 from PIL import Image
 from PIL.ExifTags import TAGS
 
@@ -20,10 +21,10 @@ from PIL.ExifTags import TAGS
 # CONFIGURATION
 # ============================================================================
 
-DEFAULT_CAPTION = ""            # Global default caption when no caption file exists
+DEFAULT_CAPTION = ""  # Global default caption when no caption file exists
 IMAGES_DIR = Path("images")
 UPLOADED_DIR = Path("uploaded")
-CONFIG_DIR = Path("config")     # Instabot stores session files here
+SESSION_FILE = "instagram_session.json"
 SUPPORTED_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.JPG', '.JPEG', '.PNG'}
 
 # ============================================================================
@@ -43,13 +44,6 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 # CAPTION VARIABLE REGISTRY
 # ============================================================================
-
-def to_tag(text: str) -> str:
-    """Convert text to lowercase tag without spaces."""
-    if not text or text == 'Unknown' or text == 'N/A':
-        return 'N/A'
-    return text.lower().replace(' ', '')
-
 
 def get_variable_registry() -> Dict[str, Dict[str, Any]]:
     """
@@ -168,6 +162,13 @@ def get_variable_registry() -> Dict[str, Dict[str, Any]]:
             'extractor': lambda img_data: get_orientation(img_data.get('width'), img_data.get('height'))
         },
     }
+
+
+def to_tag(text: str) -> str:
+    """Convert text to lowercase tag without spaces."""
+    if not text or text == 'Unknown' or text == 'N/A':
+        return 'N/A'
+    return text.lower().replace(' ', '').replace('-', '')
 
 
 def format_exposure_time(exposure_time: Optional[float]) -> str:
@@ -313,7 +314,6 @@ def list_available_variables():
     print("AVAILABLE CAPTION VARIABLES")
     print("="*70)
     print("\nUsage: {VARIABLE_NAME} in your caption files")
-    print("Example: '{FILE_NAME}.\\n{IMAGE_MAKE} {IMAGE_MODEL} | {IMAGE_F_NUMBER}'")
     print("\nExample caption file:")
     print("  {FILE_NAME}.")
     print("  {IMAGE_MAKE} {IMAGE_MODEL} | {IMAGE_F_NUMBER} | {IMAGE_EXPOSURE_TIME} | {IMAGE_FOCAL_LENGTH} | ISO {IMAGE_PHOTOGRAPHIC_SENSITIVITY}")
@@ -338,8 +338,7 @@ def ensure_directories():
     """Create necessary directories if they don't exist."""
     IMAGES_DIR.mkdir(exist_ok=True)
     UPLOADED_DIR.mkdir(exist_ok=True)
-    CONFIG_DIR.mkdir(exist_ok=True)
-    logger.info(f"Directories ensured: {IMAGES_DIR}, {UPLOADED_DIR}, {CONFIG_DIR}")
+    logger.info(f"Directories ensured: {IMAGES_DIR}, {UPLOADED_DIR}")
 
 
 def find_image_to_upload() -> Optional[Path]:
@@ -416,48 +415,93 @@ def get_caption_for_image(image_path: Path, custom_caption: Optional[str] = None
         logger.info("Caption template variables processed")
         logger.debug(f"Original: {raw_caption}")
         logger.debug(f"Processed: {processed_caption}")
-
+    
     return processed_caption
 
 
-def login_instagram(username: str, password: str) -> Bot:
+def login_instagram(username: str, password: str) -> Client:
     """
     Login to Instagram with session management.
     
     This function:
-    - Creates Bot instance with optimized settings
     - Loads existing session if available
     - Creates new session if needed
     - Implements anti-detection measures
+    - Handles 2FA and verification challenges
+    - Saves session for future use
     
     Args:
         username: Instagram username
         password: Instagram password
     
     Returns:
-        Authenticated Instagram bot
+        Authenticated Instagram client
     """
-    # Create bot instance
-    # Instabot automatically handles session management in config/ directory
-    bot = Bot()
+    client = Client()
     
-    logger.info("Logging in to Instagram...")
+    # Configure client to avoid bot detection
+    client.delay_range = [1, 3]  # Random delay between 1-3 seconds
+    
+    session_path = Path(SESSION_FILE)
+    
+    # Try to load existing session
+    if session_path.exists():
+        logger.info("Loading existing session...")
+        try:
+            client.load_settings(session_path)
+            client.login(username, password)
+            
+            # Verify session is still valid
+            client.get_timeline_feed()
+            logger.info("Successfully loaded existing session")
+            return client
+        except Exception as e:
+            logger.warning(f"Existing session invalid or expired: {e}")
+            logger.info("Creating new session...")
+    
+    # Create new session
     try:
-        # Login - instabot will automatically use cached session if available
-        bot.login(username=username, password=password)
-        logger.info("Successfully logged in to Instagram")
-        return bot
+        logger.info("Logging in to Instagram...")
+        
+        # Handle potential 2FA
+        try:
+            client.login(username, password)
+        except Exception as login_error:
+            error_msg = str(login_error).lower()
+            
+            # Check if it's a 2FA challenge
+            if "two_factor_required" in error_msg or "challenge_required" in error_msg:
+                logger.info("Two-factor authentication or challenge required")
+                logger.info("Please check your Instagram app or email for verification code")
+                
+                verification_code = input("Enter verification code: ").strip()
+                client.login(username, password, verification_code=verification_code)
+            elif "checkpoint_required" in error_msg or "challenge" in error_msg:
+                logger.error("Instagram requires manual verification")
+                logger.error("Please:")
+                logger.error("1. Log in to Instagram via app or website")
+                logger.error("2. Complete any security checks")
+                logger.error("3. Wait 1-2 hours before trying again")
+                raise
+            else:
+                raise login_error
+        
+        # Save session for future use
+        client.dump_settings(session_path)
+        logger.info(f"Session saved to {session_path}")
+        
+        return client
     except Exception as e:
         logger.error(f"Login failed: {e}")
         raise
 
 
-def upload_photo_to_instagram(bot: Bot, image_path: Path, caption: str) -> bool:
+def upload_photo_to_instagram(client: Client, image_path: Path, caption: str) -> bool:
     """
     Upload a photo to Instagram.
     
     Args:
-        bot: Authenticated Instagram bot
+        client: Authenticated Instagram client
         image_path: Path to the image file
         caption: Caption text for the photo
     
@@ -466,20 +510,15 @@ def upload_photo_to_instagram(bot: Bot, image_path: Path, caption: str) -> bool:
     """
     try:
         logger.info(f"Uploading {image_path} to Instagram...")
-        logger.info(f"Caption: {caption[:50]}..." if len(caption) > 50 else f"Caption: {caption}")
+        logger.info(f"Caption: {caption[:100]}..." if len(caption) > 100 else f"Caption: {caption}")
         
-        # Upload photo
-        success = bot.upload_photo(
-            photo=str(image_path),
+        media = client.photo_upload(
+            path=str(image_path),
             caption=caption
         )
         
-        if success:
-            logger.info("Successfully uploaded to Instagram!")
-            return True
-        else:
-            logger.error("Upload failed - bot.upload_photo returned False")
-            return False
+        logger.info(f"Successfully uploaded! Media ID: {media.pk}")
+        return True
     except Exception as e:
         logger.error(f"Upload failed: {e}")
         return False
@@ -493,6 +532,12 @@ def move_to_uploaded(image_path: Path):
         image_path: Path to the uploaded image
     """
     try:
+        # Check if image still exists (some libraries might move it)
+        if not image_path.exists():
+            logger.warning(f"Image {image_path} no longer exists (may have been moved during upload)")
+            logger.warning("Upload was successful, but file cleanup skipped")
+            return
+        
         # Move image
         dest_image = UPLOADED_DIR / image_path.name
         shutil.move(str(image_path), str(dest_image))
@@ -571,13 +616,13 @@ def main():
     
     # Login to Instagram
     try:
-        bot = login_instagram(username, password)
+        client = login_instagram(username, password)
     except Exception as e:
         logger.error(f"Failed to login: {e}")
         sys.exit(1)
     
     # Upload the photo
-    upload_success = upload_photo_to_instagram(bot, image_path, caption)
+    upload_success = upload_photo_to_instagram(client, image_path, caption)
     
     if upload_success:
         # Move uploaded files to uploaded directory
