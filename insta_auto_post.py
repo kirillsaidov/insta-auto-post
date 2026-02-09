@@ -428,6 +428,7 @@ def login_instagram(username: str, password: str) -> Client:
     - Creates new session if needed
     - Implements anti-detection measures
     - Handles 2FA and verification challenges
+    - Handles Instagram security challenges (challenge_required)
     - Saves session for future use
     
     Args:
@@ -437,6 +438,8 @@ def login_instagram(username: str, password: str) -> Client:
     Returns:
         Authenticated Instagram client
     """
+    from instagrapi.exceptions import ChallengeRequired, LoginRequired
+    
     client = Client()
     
     # Configure client to avoid bot detection
@@ -455,6 +458,11 @@ def login_instagram(username: str, password: str) -> Client:
             client.get_timeline_feed()
             logger.info("Successfully loaded existing session")
             return client
+        except ChallengeRequired as e:
+            logger.warning(f"Instagram challenge required: {e}")
+            logger.warning("Session flagged - deleting old session file")
+            session_path.unlink(missing_ok=True)  # Delete invalid session
+            logger.info("Creating new session...")
         except Exception as e:
             logger.warning(f"Existing session invalid or expired: {e}")
             logger.info("Creating new session...")
@@ -463,25 +471,49 @@ def login_instagram(username: str, password: str) -> Client:
     try:
         logger.info("Logging in to Instagram...")
         
-        # Handle potential 2FA
+        # Set up challenge code handler for SMS/Email verification
+        def challenge_code_handler(username, choice):
+            logger.info(f"Challenge required for {username}")
+            logger.info(f"Verification code will be sent via: {choice}")
+            code = input(f"Enter code sent to {choice}: ").strip()
+            return code
+        
+        client.challenge_code_handler = challenge_code_handler
+        
+        # Attempt login with challenge handling
         try:
             client.login(username, password)
+        except ChallengeRequired as e:
+            logger.error("Instagram security challenge detected")
+            logger.error("This usually happens when Instagram detects automated activity")
+            logger.error("")
+            logger.error("REQUIRED STEPS:")
+            logger.error("1. Open Instagram app or go to instagram.com")
+            logger.error("2. Log in manually with your credentials")
+            logger.error("3. Complete ANY verification (SMS, email, CAPTCHA)")
+            logger.error("4. Wait 24-48 hours before using this script again")
+            logger.error("5. Delete instagram_session.json file")
+            logger.error("6. Consider reducing posting frequency")
+            logger.error("")
+            logger.error(f"Error details: {e}")
+            raise
         except Exception as login_error:
             error_msg = str(login_error).lower()
             
             # Check if it's a 2FA challenge
-            if "two_factor_required" in error_msg or "challenge_required" in error_msg:
-                logger.info("Two-factor authentication or challenge required")
-                logger.info("Please check your Instagram app or email for verification code")
+            if "two_factor_required" in error_msg:
+                logger.info("Two-factor authentication required")
+                logger.info("Please check your Instagram app or SMS for verification code")
                 
-                verification_code = input("Enter verification code: ").strip()
+                verification_code = input("Enter 2FA verification code: ").strip()
                 client.login(username, password, verification_code=verification_code)
-            elif "checkpoint_required" in error_msg or "challenge" in error_msg:
-                logger.error("Instagram requires manual verification")
+            elif "checkpoint_required" in error_msg:
+                logger.error("Instagram checkpoint required - manual verification needed")
                 logger.error("Please:")
                 logger.error("1. Log in to Instagram via app or website")
                 logger.error("2. Complete any security checks")
                 logger.error("3. Wait 1-2 hours before trying again")
+                logger.error("4. Delete instagram_session.json file")
                 raise
             else:
                 raise login_error
@@ -491,6 +523,9 @@ def login_instagram(username: str, password: str) -> Client:
         logger.info(f"Session saved to {session_path}")
         
         return client
+    except ChallengeRequired:
+        # Already logged detailed instructions above
+        raise
     except Exception as e:
         logger.error(f"Login failed: {e}")
         raise
